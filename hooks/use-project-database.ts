@@ -4,9 +4,11 @@ import initSqlJs, { type Database } from "sql.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { createGuidelineRepository, type GuidelineRepository } from "@/lib/guideline-repository";
+import { createPoemRepository, type PoemRepository } from "@/lib/poem-repository";
 import { loadProjectDatabase, saveProjectDatabase } from "@/lib/project-database-storage";
 import { createProjectRepository, type ProjectRepository } from "@/lib/project-repository";
 import { guidelineTypes, type GuidelineType, type GuidelineVersion } from "@/types/guideline";
+import type { SavePoemDraftInput } from "@/types/poem";
 import type { CreateProjectInput, Project, UpdateProjectInput } from "@/types/project";
 
 export type SaveStatus = "loading" | "saved" | "saving" | "error";
@@ -23,18 +25,24 @@ export function useProjectDatabase() {
   const databaseRef = useRef<Database | null>(null);
   const repositoryRef = useRef<ProjectRepository | null>(null);
   const guidelineRepositoryRef = useRef<GuidelineRepository | null>(null);
+  const poemRepositoryRef = useRef<PoemRepository | null>(null);
+  const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingPersistRef = useRef(0);
   const searchRef = useRef("");
+  const [allProjects, setAllProjects] = useState<Project[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [recentProjects, setRecentProjects] = useState<Project[]>([]);
   const [trash, setTrash] = useState<Project[]>([]);
   const [guidelines, setGuidelines] = useState<GuidelineMap>(emptyGuidelines);
   const [guidelineHistories, setGuidelineHistories] = useState<GuidelineHistoryMap>(emptyHistories);
+
   const [ready, setReady] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("loading");
 
   const refreshProjects = useCallback(() => {
     const repository = repositoryRef.current;
     if (!repository) return;
+    setAllProjects(repository.list());
     setProjects(repository.list({ search: searchRef.current }));
     setRecentProjects(repository.recent(4));
     setTrash(repository.listTrash());
@@ -46,6 +54,7 @@ export function useProjectDatabase() {
     setGuidelines(Object.fromEntries(guidelineTypes.map((type) => [type, repository.open(type)])) as GuidelineMap);
     setGuidelineHistories(Object.fromEntries(guidelineTypes.map((type) => [type, repository.history(type)])) as GuidelineHistoryMap);
   }, []);
+
 
   useEffect(() => {
     let active = true;
@@ -59,8 +68,10 @@ export function useProjectDatabase() {
         databaseRef.current = database;
         repositoryRef.current = createProjectRepository(database);
         guidelineRepositoryRef.current = createGuidelineRepository(database);
+        poemRepositoryRef.current = createPoemRepository(database);
         refreshProjects();
         refreshGuidelines();
+
         setReady(true);
         setSaveStatus("saved");
       } catch (error) {
@@ -76,20 +87,31 @@ export function useProjectDatabase() {
       databaseRef.current = null;
       repositoryRef.current = null;
       guidelineRepositoryRef.current = null;
+      poemRepositoryRef.current = null;
     };
   }, [refreshGuidelines, refreshProjects]);
 
   const persist = useCallback(async () => {
     const database = databaseRef.current;
     if (!database) return;
+    const snapshot = database.export();
+    pendingPersistRef.current += 1;
     setSaveStatus("saving");
-    try {
-      await saveProjectDatabase(database.export());
-      setSaveStatus("saved");
-    } catch (error) {
-      console.error("SQLite 데이터베이스를 저장하지 못했습니다.", error);
-      setSaveStatus("error");
-    }
+    const saveSnapshot = async () => {
+      let failed = false;
+      try {
+        await saveProjectDatabase(snapshot);
+      } catch (error) {
+        failed = true;
+        console.error("SQLite 데이터베이스를 저장하지 못했습니다.", error);
+        setSaveStatus("error");
+      } finally {
+        pendingPersistRef.current -= 1;
+        if (!failed && pendingPersistRef.current === 0) setSaveStatus("saved");
+      }
+    };
+    persistQueueRef.current = persistQueueRef.current.catch(() => undefined).then(saveSnapshot);
+    await persistQueueRef.current;
   }, []);
 
   const setSearch = useCallback((search: string) => {
@@ -166,7 +188,37 @@ export function useProjectDatabase() {
     return restored;
   }, [persist, refreshGuidelines]);
 
+  const openPoemDraft = useCallback((projectId: string) => poemRepositoryRef.current?.openDraft(projectId) ?? null, []);
+
+  const poemHistory = useCallback((projectId: string) => poemRepositoryRef.current?.history(projectId) ?? [], []);
+
+  const savePoemDraft = useCallback(async (projectId: string, input: SavePoemDraftInput) => {
+    const repository = poemRepositoryRef.current;
+    if (!repository) return;
+    const saved = repository.saveDraft(projectId, input);
+    await persist();
+    return saved;
+  }, [persist]);
+
+  const createPoemVersion = useCallback(async (projectId: string) => {
+    const repository = poemRepositoryRef.current;
+    if (!repository) return;
+    const version = repository.createVersion(projectId);
+    await persist();
+    return version;
+  }, [persist]);
+
+  const restorePoemVersion = useCallback(async (projectId: string, version: number) => {
+    const repository = poemRepositoryRef.current;
+    if (!repository) return;
+    const restored = repository.restore(projectId, version);
+    await persist();
+    return restored;
+  }, [persist]);
+
   return {
+    allProjects,
+    createPoemVersion,
     createProject,
     deleteGuideline,
     deletePermanently,
@@ -174,12 +226,16 @@ export function useProjectDatabase() {
     guidelines,
     markOpened,
     moveToTrash,
+    openPoemDraft,
+    poemHistory,
     projects,
     ready,
     recentProjects,
     restoreGuideline,
+    restorePoemVersion,
     restoreProject,
     saveGuideline,
+    savePoemDraft,
     saveStatus,
     setSearch,
     trash,
