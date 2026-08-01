@@ -2,7 +2,14 @@
 
 시 한 편을 입력해 시화, 시노래, 시낭독, 영상 제작과 YouTube 업로드까지 한곳에서 관리하기 위한 통합 제작 앱입니다.
 
-> 현재 단계는 프로젝트 초기 설정만 완료된 상태입니다. 제작 기능은 아직 구현하지 않습니다.
+> 현재 단계는 프로젝트 관리 기능만 구현되어 있습니다. 시 작성과 미디어 제작 기능은 아직 구현하지 않습니다.
+
+## 현재 기능
+
+- 프로젝트 생성, 목록, 검색, 최근 프로젝트
+- 프로젝트명과 설명 수정 및 자동저장
+- 휴지통 이동, 복원, 영구 삭제
+- 브라우저 SQLite 데이터베이스 저장
 
 ## 기술 스택
 
@@ -10,7 +17,10 @@
 - React 19
 - TypeScript 5
 - Tailwind CSS 4
+- sql.js (SQLite WebAssembly)
+- IndexedDB (SQLite 파일 영속화)
 - ESLint 9
+- Vitest
 - npm
 - Vercel
 
@@ -30,6 +40,7 @@ npm run dev    # 개발 서버
 npm run build  # 프로덕션 빌드
 npm run start  # 프로덕션 서버
 npm run lint   # 정적 검사
+npm test       # 자동 테스트
 ```
 
 ## 프로젝트 구조
