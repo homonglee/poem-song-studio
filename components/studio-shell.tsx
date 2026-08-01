@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
+import { GuidelineManager } from "@/components/guideline-manager";
 import { useProjectDatabase } from "@/hooks/use-project-database";
 import type { Project } from "@/types/project";
 
@@ -32,15 +33,15 @@ function Icon({ name, className = "h-5 w-5" }: { name: IconName; className?: str
   return <svg aria-hidden="true" className={className} fill="none" viewBox="0 0 20 20" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6">{iconPaths[name]}</svg>;
 }
 
-const navigation: { label: string; icon: IconName; active?: boolean }[] = [
-  { label: "프로젝트", icon: "folder", active: true },
+const navigation: { label: string; icon: IconName; section?: "projects" | "guidelines" }[] = [
+  { label: "프로젝트", icon: "folder", section: "projects" },
   { label: "시 작성", icon: "pen" },
   { label: "시화", icon: "image" },
   { label: "시노래", icon: "music" },
   { label: "시낭독", icon: "mic" },
   { label: "영상", icon: "video" },
   { label: "유튜브", icon: "youtube" },
-  { label: "지침관리", icon: "guide" },
+  { label: "지침관리", icon: "guide", section: "guidelines" },
   { label: "환경설정", icon: "settings" },
 ];
 
@@ -69,6 +70,7 @@ export function StudioShell() {
   const database = useProjectDatabase();
   const setDatabaseSearch = database.setSearch;
   const updateProject = database.updateProject;
+  const [section, setSection] = useState<"projects" | "guidelines">("projects");
   const [view, setView] = useState<"projects" | "trash">("projects");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -155,17 +157,21 @@ export function StudioShell() {
         <nav aria-label="주 메뉴">
           <p className="mb-2 px-2 text-[10px] font-semibold tracking-[0.14em] text-[#92969d] uppercase dark:text-[#62666d]">워크스페이스</p>
           <ul className="grid grid-cols-2 gap-1 sm:grid-cols-3 lg:block lg:space-y-1">
-            {navigation.map((item) => <li key={item.label}><div aria-current={item.active ? "page" : undefined} aria-disabled={!item.active} className={`flex min-h-11 items-center gap-2.5 rounded-lg px-3 text-[13px] font-medium lg:min-h-10 ${item.active ? "bg-[#eeefff] text-[#4f57bb] dark:bg-[#5e6ad2]/20 dark:text-[#aeb4ff]" : "cursor-not-allowed text-[#a3a7ad] dark:text-[#555960]"}`}><Icon name={item.icon} className="h-[18px] w-[18px] shrink-0" /><span>{item.label}</span>{!item.active && <span className="ml-auto hidden text-[9px] lg:inline">준비중</span>}</div></li>)}
+            {navigation.map((item) => {
+              const active = item.section === section;
+              return <li key={item.label}><button type="button" onClick={() => item.section && setSection(item.section)} disabled={!item.section} aria-current={active ? "page" : undefined} className={`flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 text-left text-[13px] font-medium lg:min-h-10 ${active ? "bg-[#eeefff] text-[#4f57bb] dark:bg-[#5e6ad2]/20 dark:text-[#aeb4ff]" : item.section ? "text-[#686d74] hover:bg-[#f5f6f8] dark:text-[#a0a5ad] dark:hover:bg-white/[0.04]" : "cursor-not-allowed text-[#a3a7ad] dark:text-[#555960]"}`}><Icon name={item.icon} className="h-[18px] w-[18px] shrink-0" /><span>{item.label}</span>{!item.section && <span className="ml-auto hidden text-[9px] lg:inline">준비중</span>}</button></li>;
+            })}
           </ul>
         </nav>
-        <div className="mt-5 hidden rounded-xl border border-black/8 bg-[#fafafa] p-3 dark:border-white/8 dark:bg-white/[0.025] lg:block"><p className="text-xs font-medium">프로젝트 관리 단계</p><p className="mt-1 text-[11px] leading-5 text-[#7a7f87] dark:text-[#70757d]">현재는 프로젝트 정보만 관리합니다.</p></div>
+        <div className="mt-5 hidden rounded-xl border border-black/8 bg-[#fafafa] p-3 dark:border-white/8 dark:bg-white/[0.025] lg:block"><p className="text-xs font-medium">{section === "guidelines" ? "지침 관리 단계" : "프로젝트 관리 단계"}</p><p className="mt-1 text-[11px] leading-5 text-[#7a7f87] dark:text-[#70757d]">{section === "guidelines" ? "6종 제작 지침과 버전을 관리합니다." : "현재는 프로젝트 정보만 관리합니다."}</p></div>
       </aside>
 
       <header className="flex min-h-[72px] items-center justify-between gap-4 border-b border-black/8 bg-white/90 px-5 backdrop-blur dark:border-white/8 dark:bg-[#08090a]/90 sm:px-7 lg:col-span-2">
-        <div className="min-w-0"><p className="text-[11px] font-medium text-[#898d94] dark:text-[#62666d]">프로젝트 관리</p><h1 className="truncate text-base font-semibold tracking-tight sm:text-lg">{selectedProject?.name ?? "내 프로젝트"}</h1></div>
+        <div className="min-w-0"><p className="text-[11px] font-medium text-[#898d94] dark:text-[#62666d]">{section === "guidelines" ? "지침 관리" : "프로젝트 관리"}</p><h1 className="truncate text-base font-semibold tracking-tight sm:text-lg">{section === "guidelines" ? "제작 지침" : selectedProject?.name ?? "내 프로젝트"}</h1></div>
         <div className="flex shrink-0 items-center gap-2 sm:gap-3"><div className={`hidden items-center gap-2 rounded-full px-3 py-1.5 text-[11px] font-medium sm:flex ${database.saveStatus === "error" ? "bg-red-50 text-red-700 dark:bg-red-400/10 dark:text-red-300" : "bg-emerald-50 text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300"}`}><span className={`h-1.5 w-1.5 rounded-full ${database.saveStatus === "saving" ? "animate-pulse bg-amber-500" : "bg-emerald-500"}`} />{saveLabel}</div><button type="button" onClick={toggleTheme} aria-label="라이트·다크 테마 전환" className="grid h-10 w-10 place-items-center rounded-lg border border-black/10 bg-white text-[#5f6368] hover:bg-[#f5f6f7] dark:border-white/10 dark:bg-white/[0.04] dark:text-[#d0d6e0]"><span className="dark:hidden"><Icon name="moon" className="h-[18px] w-[18px]" /></span><span className="hidden dark:block"><Icon name="sun" className="h-[18px] w-[18px]" /></span></button></div>
       </header>
 
+      {section === "projects" ? <>
       <main className="min-w-0 p-4 sm:p-6 lg:overflow-y-auto lg:p-7">
         <div className="mx-auto max-w-5xl">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-xs font-medium text-[#6f747b] dark:text-[#8a8f98]">프로젝트</p><h2 className="mt-1 text-2xl font-semibold tracking-[-0.035em] sm:text-[28px]">작품 프로젝트를 관리하세요</h2><p className="mt-2 text-sm text-[#747980] dark:text-[#8a8f98]">프로젝트 정보는 브라우저의 SQLite 데이터베이스에 자동 저장됩니다.</p></div><button type="button" onClick={() => setCreateOpen(true)} disabled={!database.ready} className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-[#5e6ad2] px-4 text-sm font-semibold text-white transition hover:bg-[#515cc4] disabled:opacity-50"><Icon name="plus" className="h-4 w-4" />새 프로젝트</button></div>
@@ -179,6 +185,8 @@ export function StudioShell() {
       </main>
 
       <aside className="border-t border-black/8 bg-white p-5 dark:border-white/8 dark:bg-[#0f1011] sm:p-6 lg:overflow-y-auto lg:border-t-0 lg:border-l"><div className="flex items-center justify-between"><div><p className="text-xs font-medium text-[#777c83] dark:text-[#8a8f98]">프로젝트 정보</p><h2 className="mt-1 text-base font-semibold">{selectedProject ? "프로젝트 수정" : "선택된 프로젝트 없음"}</h2></div>{selectedProject && <div className="grid h-9 w-9 place-items-center rounded-lg bg-[#eeefff] text-[#5e6ad2] dark:bg-[#5e6ad2]/20 dark:text-[#aeb4ff]"><Icon name="edit" className="h-4 w-4" /></div>}</div>{selectedProject ? <div className="mt-6 space-y-5"><label className="block"><span className="text-xs font-medium">프로젝트명</span><input value={draftName} onChange={(event) => setDraftName(event.target.value)} maxLength={80} className="mt-2 h-10 w-full rounded-lg border border-black/10 bg-[#fafafa] px-3 text-sm outline-none focus:border-[#5e6ad2] focus:ring-2 focus:ring-[#5e6ad2]/10 dark:border-white/10 dark:bg-white/[0.035]" /></label><label className="block"><span className="text-xs font-medium">설명</span><textarea value={draftDescription} onChange={(event) => setDraftDescription(event.target.value)} maxLength={300} rows={6} placeholder="프로젝트에 대한 간단한 설명" className="mt-2 w-full resize-none rounded-lg border border-black/10 bg-[#fafafa] p-3 text-sm leading-6 outline-none focus:border-[#5e6ad2] focus:ring-2 focus:ring-[#5e6ad2]/10 dark:border-white/10 dark:bg-white/[0.035]" /></label><div className="rounded-xl bg-[#f7f8fa] p-4 dark:bg-white/[0.035]"><p className="flex items-center gap-2 text-xs font-medium"><span className={`h-1.5 w-1.5 rounded-full ${database.saveStatus === "saving" ? "animate-pulse bg-amber-500" : "bg-emerald-500"}`} />{saveLabel}</p><p className="mt-1.5 text-[11px] leading-5 text-[#7d8289] dark:text-[#70757d]">입력한 프로젝트 정보는 0.7초 후 SQLite에 자동 저장됩니다.</p></div><dl className="space-y-3 border-t border-black/7 pt-5 text-[11px] dark:border-white/7"><div className="flex justify-between gap-3"><dt className="text-[#8c9097]">생성일</dt><dd>{dateFormatter.format(new Date(selectedProject.createdAt))}</dd></div><div className="flex justify-between gap-3"><dt className="text-[#8c9097]">마지막 수정</dt><dd>{dateFormatter.format(new Date(selectedProject.updatedAt))}</dd></div><div className="flex justify-between gap-3"><dt className="text-[#8c9097]">저장 방식</dt><dd>SQLite · 자동저장</dd></div></dl></div> : <div className="mt-8 rounded-xl border border-dashed border-black/12 p-6 text-center dark:border-white/12"><Icon name="edit" className="mx-auto h-5 w-5 text-[#999da3]" /><p className="mt-3 text-xs font-medium">프로젝트를 선택하세요</p><p className="mt-1 text-[11px] leading-5 text-[#888d94]">목록에서 프로젝트를 선택하면 이름과 설명을 수정할 수 있습니다.</p></div>}</aside>
+
+      </> : <GuidelineManager database={database} />}
 
       {createOpen && <div className="fixed inset-0 z-50 grid place-items-center bg-black/45 p-4 backdrop-blur-sm" role="presentation" onMouseDown={(event) => event.currentTarget === event.target && setCreateOpen(false)}><section role="dialog" aria-modal="true" aria-labelledby="new-project-title" className="w-full max-w-md rounded-2xl border border-black/10 bg-white p-5 shadow-2xl dark:border-white/10 dark:bg-[#151619] sm:p-6"><div className="flex items-center justify-between"><div><p className="text-xs font-medium text-[#7b8087]">새 작업공간</p><h2 id="new-project-title" className="mt-1 text-lg font-semibold">새 프로젝트</h2></div><button type="button" onClick={() => setCreateOpen(false)} aria-label="닫기" className="grid h-9 w-9 place-items-center rounded-lg hover:bg-black/5 dark:hover:bg-white/5"><Icon name="x" className="h-4 w-4" /></button></div><form onSubmit={createProject} className="mt-6 space-y-4"><label className="block"><span className="text-xs font-medium">프로젝트명</span><input autoFocus required value={newName} onChange={(event) => setNewName(event.target.value)} maxLength={80} placeholder="예: 가을의 노래" className="mt-2 h-11 w-full rounded-lg border border-black/10 bg-[#fafafa] px-3 text-sm outline-none focus:border-[#5e6ad2] focus:ring-2 focus:ring-[#5e6ad2]/10 dark:border-white/10 dark:bg-white/[0.035]" /></label><label className="block"><span className="text-xs font-medium">설명 <span className="font-normal text-[#92969d]">(선택)</span></span><textarea value={newDescription} onChange={(event) => setNewDescription(event.target.value)} maxLength={300} rows={4} placeholder="프로젝트에 대한 간단한 설명" className="mt-2 w-full resize-none rounded-lg border border-black/10 bg-[#fafafa] p-3 text-sm outline-none focus:border-[#5e6ad2] focus:ring-2 focus:ring-[#5e6ad2]/10 dark:border-white/10 dark:bg-white/[0.035]" /></label><div className="flex justify-end gap-2 pt-2"><button type="button" onClick={() => setCreateOpen(false)} className="h-10 rounded-lg border border-black/10 px-4 text-sm font-medium dark:border-white/10">취소</button><button type="submit" className="h-10 rounded-lg bg-[#5e6ad2] px-4 text-sm font-semibold text-white">프로젝트 만들기</button></div></form></section></div>}
     </div>
