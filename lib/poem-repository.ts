@@ -123,6 +123,7 @@ export function createPoemRepository(db: Database, now: Clock = () => new Date()
         $updatedAt: draft.updatedAt,
       },
     );
+    if (draft.content.trim() && history(projectId).length === 0) createVersion(projectId);
     return draft;
   }
 
@@ -180,6 +181,13 @@ export function createPoemRepository(db: Database, now: Clock = () => new Date()
     return snapshot;
   }
 
+  function removeVersion(projectId: string, version: number) {
+    db.run("DELETE FROM poem_versions WHERE project_id = $projectId AND version = $version", {
+      $projectId: projectId,
+      $version: version,
+    });
+  }
+
   function restore(projectId: string, version: number): PoemVersion {
     const source = history(projectId).find((item) => item.version === version);
     if (!source) throw new Error("복원할 시 버전을 찾을 수 없습니다.");
@@ -187,7 +195,7 @@ export function createPoemRepository(db: Database, now: Clock = () => new Date()
     return createVersion(projectId);
   }
 
-  return { createVersion, history, openDraft, restore, saveDraft };
+  return { createVersion, history, openDraft, removeVersion, restore, saveDraft };
 }
 
 export type PoemRepository = ReturnType<typeof createPoemRepository>;

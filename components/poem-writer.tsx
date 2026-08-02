@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { StudioDatabase } from "@/hooks/use-project-database";
 import { aiEditActions, editPoemWithAi, type PoemEditAction } from "@/lib/poem-edit-service";
+import { formatPoemVersion, shouldCreateAdditionalVersion } from "@/lib/poem-version";
 import {
   applyEditorChange,
   createEditorHistory,
@@ -102,6 +103,7 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
     try {
       await savePoemDraft(projectId, next);
       if (!mounted.current) return false;
+      setVersions(database.poemHistory(projectId));
       if (pendingDraft.current === next) {
         pendingDraft.current = null;
         setDirty(false);
@@ -238,8 +240,14 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
     setAiRunning(null);
     setVersionBusy(true);
     try {
+      const versionCountBeforeSave = database.poemHistory(projectId).length;
       const saved = await persistCurrentDocument();
       if (!saved || pendingDraft.current) return;
+      const savedVersions = database.poemHistory(projectId);
+      if (!shouldCreateAdditionalVersion(versionCountBeforeSave, savedVersions.length)) {
+        setVersions(savedVersions);
+        return;
+      }
       try {
         await database.createPoemVersion(projectId);
         setVersions(database.poemHistory(projectId));
@@ -452,9 +460,9 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
       </main>
 
       <aside className="border-t border-black/8 bg-white p-5 dark:border-white/8 dark:bg-[#0f1011] sm:p-6 lg:overflow-y-auto lg:border-t-0 lg:border-l">
-        <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-medium text-[#777c83] dark:text-[#8a8f98]">기존 버전관리</p><h2 className="mt-1 text-base font-semibold">저장된 버전</h2></div><button type="button" onClick={createVersion} disabled={!document.content.trim() || versionBusy} className="h-9 rounded-lg border border-[#5e6ad2]/30 px-3 text-[10px] font-semibold text-[#5e6ad2] disabled:opacity-40">{versionBusy ? "처리 중" : "버전 저장"}</button></div>
+        <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-medium text-[#777c83] dark:text-[#8a8f98]">기본 버전 저장</p><h2 className="mt-1 text-base font-semibold">저장된 버전</h2></div><button type="button" onClick={createVersion} disabled={!document.content.trim() || versionBusy} className="h-9 rounded-lg border border-[#5e6ad2]/30 px-3 text-[10px] font-semibold text-[#5e6ad2] disabled:opacity-40">{versionBusy ? "처리 중" : "새 버전 저장"}</button></div>
         <p className="mt-2 text-[10px] leading-5 text-[#858a91]">이번 단계에서는 버전 비교를 추가하지 않고 기존 저장·복원 기능만 유지합니다.</p>
-        {versions.length === 0 ? <div className="mt-7 rounded-xl border border-dashed border-black/12 p-6 text-center dark:border-white/12"><p className="text-xs font-medium">저장된 버전이 없습니다</p></div> : <ol className="mt-5 space-y-2">{versions.map((version) => <li key={version.id} className="rounded-xl border border-black/8 p-3 dark:border-white/8"><div className="flex items-center justify-between gap-2"><span className="text-xs font-semibold">v{version.version}</span><span className="text-[9px] text-[#92969d]">{dateFormatter.format(new Date(version.createdAt))}</span></div><p className="mt-2 truncate text-[11px] font-medium">{version.title || "제목 없는 시"}</p><p className="mt-1 line-clamp-3 whitespace-pre-line text-[11px] leading-5 text-[#777c83] dark:text-[#8a8f98]">{version.content}</p><button type="button" onClick={() => restoreVersion(version.version)} disabled={versionBusy} className="mt-2 text-[10px] font-semibold text-[#5e6ad2] hover:underline disabled:opacity-40">이 버전 복원</button></li>)}</ol>}
+        {versions.length === 0 ? <div className="mt-7 rounded-xl border border-dashed border-black/12 p-6 text-center dark:border-white/12"><p className="text-xs font-medium">시를 처음 저장하면 v01이 자동 생성됩니다</p></div> : <ol className="mt-5 space-y-2">{versions.map((version) => <li key={version.id} className="rounded-xl border border-black/8 p-3 dark:border-white/8"><div className="flex items-center justify-between gap-2"><span className="text-xs font-semibold">{formatPoemVersion(version.version)}</span><span className="text-[9px] text-[#92969d]">{dateFormatter.format(new Date(version.createdAt))}</span></div><p className="mt-2 truncate text-[11px] font-medium">{version.title || "제목 없는 시"}</p><p className="mt-1 line-clamp-3 whitespace-pre-line text-[11px] leading-5 text-[#777c83] dark:text-[#8a8f98]">{version.content}</p><button type="button" onClick={() => restoreVersion(version.version)} disabled={versionBusy} className="mt-2 text-[10px] font-semibold text-[#5e6ad2] hover:underline disabled:opacity-40">이 버전 복원</button></li>)}</ol>}
       </aside>
     </>
   );

@@ -212,11 +212,15 @@ export function useProjectDatabase() {
   const savePoemDraft = useCallback(async (projectId: string, input: SavePoemDraftInput) => {
     const repository = poemRepositoryRef.current;
     if (!repository) return;
+    const hadVersions = repository.history(projectId).length > 0;
     const saved = repository.saveDraft(projectId, input);
-    const persisted = await persist();
-    if (!persisted.success) throw new Error("시 초안을 저장하지 못했습니다.");
+    const persisted = await settlePersistence(await persist());
+    if (!persisted) {
+      if (!hadVersions) repository.removeVersion(projectId, 1);
+      throw new Error("시 초안을 저장하지 못했습니다.");
+    }
     return saved;
-  }, [persist]);
+  }, [persist, settlePersistence]);
 
   const createPoemVersion = useCallback(async (projectId: string) => {
     const repository = poemRepositoryRef.current;

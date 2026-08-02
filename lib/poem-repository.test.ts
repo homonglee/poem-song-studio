@@ -35,6 +35,29 @@ describe("poem repository", () => {
     expect(poems.openDraft(projectId)).toEqual(saved);
   });
 
+  it("automatically creates v01 with its saved date for the first poem", async () => {
+    const SQL = await initSqlJs();
+    const db = new SQL.Database();
+    const { poems, projectIds: [projectId] } = setup(db, 1, () => "2026-08-02T10:05:00.000Z");
+
+    poems.saveDraft(projectId, { mode: "existing", source: "원문", content: "첫 완성본" });
+
+    expect(poems.history(projectId)).toMatchObject([
+      { version: 1, content: "첫 완성본", createdAt: "2026-08-02T10:05:00.000Z" },
+    ]);
+  });
+
+  it("can roll back an automatic v01 that was not persisted", async () => {
+    const SQL = await initSqlJs();
+    const db = new SQL.Database();
+    const { poems, projectIds: [projectId] } = setup(db);
+    poems.saveDraft(projectId, { mode: "existing", source: "원문", content: "저장 실패 예정" });
+
+    poems.removeVersion(projectId, 1);
+
+    expect(poems.history(projectId)).toEqual([]);
+  });
+
   it("migrates a legacy draft with editor defaults and preserved original text", async () => {
     const SQL = await initSqlJs();
     const db = new SQL.Database();
@@ -87,17 +110,19 @@ describe("poem repository", () => {
   it("creates numbered snapshots and lists newest versions first", async () => {
     const SQL = await initSqlJs();
     const db = new SQL.Database();
-    const { poems, projectIds: [projectId] } = setup(db, 1, () => "2026-08-02T10:00:00.000Z");
+    let savedAt = "2026-08-02T10:00:00.000Z";
+    const { poems, projectIds: [projectId] } = setup(db, 1, () => savedAt);
     poems.saveDraft(projectId, { mode: "existing", source: "원문", content: "첫 편집본" });
-    poems.createVersion(projectId);
+    savedAt = "2026-08-02T11:00:00.000Z";
     poems.saveDraft(projectId, { mode: "existing", source: "원문", content: "두 번째 편집본" });
+    savedAt = "2026-08-02T12:00:00.000Z";
 
     const second = poems.createVersion(projectId);
 
-    expect(second).toMatchObject({ version: 2, content: "두 번째 편집본" });
-    expect(poems.history(projectId).map(({ version, content }) => ({ version, content }))).toEqual([
-      { version: 2, content: "두 번째 편집본" },
-      { version: 1, content: "첫 편집본" },
+    expect(second).toMatchObject({ version: 2, content: "두 번째 편집본", createdAt: "2026-08-02T12:00:00.000Z" });
+    expect(poems.history(projectId).map(({ version, content, createdAt }) => ({ version, content, createdAt }))).toEqual([
+      { version: 2, content: "두 번째 편집본", createdAt: "2026-08-02T12:00:00.000Z" },
+      { version: 1, content: "첫 편집본", createdAt: "2026-08-02T10:00:00.000Z" },
     ]);
   });
 
@@ -106,7 +131,7 @@ describe("poem repository", () => {
     const db = new SQL.Database();
     const { poems, projectIds: [projectId] } = setup(db);
     poems.saveDraft(projectId, { mode: "keyword", source: "바다", content: "첫 번째 시" });
-    const first = poems.createVersion(projectId);
+    const first = poems.history(projectId)[0];
     poems.saveDraft(projectId, { mode: "keyword", source: "바다", content: "두 번째 시" });
     poems.createVersion(projectId);
 
@@ -121,9 +146,7 @@ describe("poem repository", () => {
     const db = new SQL.Database();
     const { poems, projectIds: [projectA, projectB] } = setup(db, 2);
     poems.saveDraft(projectA, { mode: "keyword", source: "봄", content: "봄의 시" });
-    poems.createVersion(projectA);
     poems.saveDraft(projectB, { mode: "existing", source: "겨울 원문", content: "겨울의 시" });
-    poems.createVersion(projectB);
 
     expect(poems.openDraft(projectA)).toMatchObject({ content: "봄의 시" });
     expect(poems.openDraft(projectB)).toMatchObject({ content: "겨울의 시" });
@@ -136,7 +159,6 @@ describe("poem repository", () => {
     const db = new SQL.Database();
     const { poems, projectIds: [projectId], projects } = setup(db);
     poems.saveDraft(projectId, { mode: "keyword", source: "비", content: "비의 시" });
-    poems.createVersion(projectId);
     projects.moveToTrash(projectId);
 
     projects.deletePermanently(projectId);
