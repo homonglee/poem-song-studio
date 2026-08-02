@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { StudioDatabase } from "@/hooks/use-project-database";
 import { aiEditActions, editPoemWithAi, type PoemEditAction } from "@/lib/poem-edit-service";
+import { comparePoemLines, togglePoemVersionSelection } from "@/lib/poem-version-comparison";
 import { currentPoemVersionNumber, findPoemVersionById, formatPoemVersion, memoAfterVersionSave, shouldCreateAdditionalVersion } from "@/lib/poem-version";
 import {
   applyEditorChange,
@@ -78,6 +79,7 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
   const [versionBusy, setVersionBusy] = useState(false);
   const [versionMemo, setVersionMemo] = useState("");
   const [openedVersionId, setOpenedVersionId] = useState<string | null>(null);
+  const [comparisonVersionIds, setComparisonVersionIds] = useState<string[]>([]);
   const autosaveTimer = useRef<number | null>(null);
   const pendingDraft = useRef<SavePoemDraftInput | null>(null);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
@@ -90,6 +92,14 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
   const matches = useMemo(() => findMatches(document.content, searchQuery), [document.content, searchQuery]);
   const currentVersionNumber = useMemo(() => currentPoemVersionNumber(versions), [versions]);
   const openedVersion = useMemo(() => findPoemVersionById(versions, openedVersionId), [openedVersionId, versions]);
+  const comparisonVersions = useMemo(() => comparisonVersionIds.flatMap((id) => {
+    const version = findPoemVersionById(versions, id);
+    return version ? [version] : [];
+  }).sort((left, right) => left.version - right.version), [comparisonVersionIds, versions]);
+  const lineComparison = useMemo(() => comparisonVersions.length === 2
+    ? comparePoemLines(comparisonVersions[0].content, comparisonVersions[1].content)
+    : [], [comparisonVersions]);
+  const changedLineCount = useMemo(() => lineComparison.filter((line) => line.status !== "unchanged").length, [lineComparison]);
 
   function draftFor(nextDocument = document, nextOriginal = original, nextMode = mode, nextSource = source): SavePoemDraftInput {
     return {
@@ -462,16 +472,32 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
             <textarea ref={editorRef} aria-label="시 본문 편집기" value={document.content} onChange={(event) => updateDocument({ ...document, content: event.target.value })} rows={18} maxLength={30000} placeholder="시 본문을 입력하거나 생성된 초안을 편집하세요." className="mt-4 w-full resize-y rounded-xl border border-black/10 bg-[#fafafa] p-4 text-[15px] leading-8 outline-none focus:border-[#5e6ad2] focus:ring-2 focus:ring-[#5e6ad2]/10 dark:border-white/10 dark:bg-white/[0.025]" />
             <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-[#858a91]"><div className="flex flex-wrap gap-3"><span>글자 수 {stats.characters.toLocaleString()}</span><span>행 {stats.lines.toLocaleString()}</span><span>연 {stats.stanzas.toLocaleString()}</span><span className={dirty ? "font-semibold text-amber-600" : "font-semibold text-emerald-600"}>{dirty ? "수정됨" : "저장됨"}</span>{clipboardMessage && <span aria-live="polite">{clipboardMessage}</span>}</div><span>{document.content.length.toLocaleString()} / 30,000</span></div>
           </section>
+
+          {comparisonVersions.length === 2 && <section aria-label="버전 비교" className="mt-5 rounded-2xl border border-black/8 bg-white p-4 dark:border-white/8 dark:bg-[#0f1011] sm:p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-medium text-[#777c83] dark:text-[#8a8f98]">7-3단계 · 행 단위 비교</p><h2 className="mt-1 text-base font-semibold">{formatPoemVersion(comparisonVersions[0].version)} ↔ {formatPoemVersion(comparisonVersions[1].version)}</h2></div><span className="rounded-full bg-amber-50 px-3 py-1 text-[10px] font-semibold text-amber-700 dark:bg-amber-400/10 dark:text-amber-300">변경 {changedLineCount}행</span></div>
+            <div className="mt-4 grid grid-cols-2 gap-2 text-[10px] font-semibold"><div className="rounded-lg bg-[#f3f4f6] px-3 py-2 dark:bg-white/[0.05]">기준 · {formatPoemVersion(comparisonVersions[0].version)}</div><div className="rounded-lg bg-[#f3f4f6] px-3 py-2 dark:bg-white/[0.05]">비교 · {formatPoemVersion(comparisonVersions[1].version)}</div></div>
+            {changedLineCount === 0 && <p className="mt-4 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300">변경된 행이 없습니다.</p>}
+            <ol className="mt-2 space-y-1">{lineComparison.map((line, index) => {
+              const leftHighlighted = line.status === "changed" || line.status === "removed";
+              const rightHighlighted = line.status === "changed" || line.status === "added";
+              const statusLabel = line.status === "changed" ? "변경" : line.status === "added" ? "추가" : line.status === "removed" ? "삭제" : "동일";
+              return <li key={`${index}-${line.status}`} className="grid min-w-0 grid-cols-2 gap-2">
+                <div className={`min-w-0 rounded-lg border px-3 py-2 ${leftHighlighted ? line.status === "removed" ? "border-red-200 bg-red-50 dark:border-red-400/20 dark:bg-red-400/10" : "border-amber-200 bg-amber-50 dark:border-amber-400/20 dark:bg-amber-400/10" : "border-transparent bg-[#fafafa] dark:bg-white/[0.025]"}`}><span className="block text-[8px] font-semibold text-[#92969d]">{index + 1} · {statusLabel}</span><span className="mt-1 block whitespace-pre-wrap break-words text-[11px] leading-5">{line.left ?? "—"}</span></div>
+                <div className={`min-w-0 rounded-lg border px-3 py-2 ${rightHighlighted ? line.status === "added" ? "border-emerald-200 bg-emerald-50 dark:border-emerald-400/20 dark:bg-emerald-400/10" : "border-amber-200 bg-amber-50 dark:border-amber-400/20 dark:bg-amber-400/10" : "border-transparent bg-[#fafafa] dark:bg-white/[0.025]"}`}><span className="block text-[8px] font-semibold text-[#92969d]">{index + 1} · {statusLabel}</span><span className="mt-1 block whitespace-pre-wrap break-words text-[11px] leading-5">{line.right ?? "—"}</span></div>
+              </li>;
+            })}</ol>
+          </section>}
         </div>
       </main>
 
       <aside className="border-t border-black/8 bg-white p-5 dark:border-white/8 dark:bg-[#0f1011] sm:p-6 lg:overflow-y-auto lg:border-t-0 lg:border-l">
         <div className="flex items-start justify-between gap-3">
-          <div><p className="text-xs font-medium text-[#777c83] dark:text-[#8a8f98]">7-2단계 · 버전 목록</p><h2 className="mt-1 text-base font-semibold">저장된 버전</h2></div>
+          <div><p className="text-xs font-medium text-[#777c83] dark:text-[#8a8f98]">7-3단계 · 버전 비교</p><h2 className="mt-1 text-base font-semibold">저장된 버전</h2></div>
           <button type="button" onClick={createVersion} disabled={!document.content.trim() || versionBusy} className="h-9 rounded-lg border border-[#5e6ad2]/30 px-3 text-[10px] font-semibold text-[#5e6ad2] disabled:opacity-40">{versionBusy ? "처리 중" : "새 버전 저장"}</button>
         </div>
-        <p className="mt-2 text-[10px] leading-5 text-[#858a91]">버전을 선택해 읽기 전용으로 열 수 있습니다. 비교 기능은 포함하지 않습니다.</p>
+        <p className="mt-2 text-[10px] leading-5 text-[#858a91]">비교할 버전 두 개를 선택하면 본문의 변경 행을 강조합니다.</p>
         <label className="mt-3 block"><span className="text-[10px] font-medium text-[#777c83] dark:text-[#9a9fa7]">새 버전 메모</span><input aria-label="새 버전 메모" value={versionMemo} onChange={(event) => setVersionMemo(event.target.value)} maxLength={200} placeholder="예: 2연 표현 수정" className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-[#fafafa] px-3 text-xs outline-none focus:border-[#5e6ad2] dark:border-white/10 dark:bg-white/[0.035]" /></label>
+        <p aria-live="polite" className="mt-3 rounded-lg bg-[#f6f7f9] px-3 py-2 text-[10px] font-medium dark:bg-white/[0.04]">비교 선택 {comparisonVersionIds.length} / 2</p>
 
         {openedVersion && <section aria-label="열린 버전" className="mt-4 rounded-xl border border-[#5e6ad2]/25 bg-[#f8f8ff] p-3 dark:bg-[#5e6ad2]/10">
           <div className="flex items-center justify-between gap-2"><div className="flex items-center gap-2"><span className="text-xs font-semibold">{formatPoemVersion(openedVersion.version)}</span>{openedVersion.version === currentVersionNumber && <span className="rounded-full bg-[#5e6ad2] px-2 py-0.5 text-[8px] font-semibold text-white">현재 버전</span>}</div><button type="button" onClick={() => setOpenedVersionId(null)} aria-label="열린 버전 닫기" className="text-[10px] font-semibold text-[#5e6ad2]">닫기</button></div>
@@ -484,11 +510,12 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
         {versions.length === 0 ? <div className="mt-7 rounded-xl border border-dashed border-black/12 p-6 text-center dark:border-white/12"><p className="text-xs font-medium">시를 처음 저장하면 v01이 자동 생성됩니다</p></div> : <ol className="mt-5 space-y-2">{versions.map((version) => {
           const isCurrent = version.version === currentVersionNumber;
           const isOpened = version.id === openedVersionId;
-          return <li key={version.id} aria-current={isCurrent ? "true" : undefined} className={`rounded-xl border p-3 ${isOpened ? "border-[#5e6ad2]/50 bg-[#f8f8ff] dark:bg-[#5e6ad2]/10" : "border-black/8 dark:border-white/8"}`}>
+          const isCompared = comparisonVersionIds.includes(version.id);
+          return <li key={version.id} aria-current={isCurrent ? "true" : undefined} className={`rounded-xl border p-3 ${isOpened ? "border-[#5e6ad2]/50 bg-[#f8f8ff] dark:bg-[#5e6ad2]/10" : isCompared ? "border-amber-300 bg-amber-50/60 dark:border-amber-400/30 dark:bg-amber-400/10" : "border-black/8 dark:border-white/8"}`}>
             <div className="flex items-center justify-between gap-2"><div className="flex items-center gap-2"><span className="text-xs font-semibold">{formatPoemVersion(version.version)}</span>{isCurrent && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[8px] font-semibold text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300">현재 버전</span>}</div><span className="text-[9px] text-[#92969d]">생성일 {dateFormatter.format(new Date(version.createdAt))}</span></div>
             <p className="mt-2 truncate text-[11px] font-medium">{version.title || "제목 없는 시"}</p>
             <p className="mt-1 truncate text-[10px] text-[#777c83] dark:text-[#8a8f98]">메모: {version.memo || "메모 없음"}</p>
-            <div className="mt-2 flex items-center gap-3"><button type="button" onClick={() => setOpenedVersionId(version.id)} className="text-[10px] font-semibold text-[#5e6ad2] hover:underline">선택 열기</button><button type="button" onClick={() => restoreVersion(version.version)} disabled={versionBusy} className="text-[10px] font-semibold text-[#5e6ad2] hover:underline disabled:opacity-40">이 버전 복원</button></div>
+            <div className="mt-2 flex flex-wrap items-center gap-3"><button type="button" onClick={() => setComparisonVersionIds((selected) => togglePoemVersionSelection(selected, version.id))} disabled={!isCompared && comparisonVersionIds.length >= 2} aria-pressed={isCompared} className="text-[10px] font-semibold text-amber-700 hover:underline disabled:opacity-35 dark:text-amber-300">{isCompared ? "비교 해제" : "비교 선택"}</button><button type="button" onClick={() => setOpenedVersionId(version.id)} className="text-[10px] font-semibold text-[#5e6ad2] hover:underline">선택 열기</button><button type="button" onClick={() => restoreVersion(version.version)} disabled={versionBusy} className="text-[10px] font-semibold text-[#5e6ad2] hover:underline disabled:opacity-40">이 버전 복원</button></div>
           </li>;
         })}</ol>}
       </aside>
