@@ -15,6 +15,7 @@ export type SaveStatus = "loading" | "saved" | "saving" | "error";
 
 type GuidelineMap = Record<GuidelineType, GuidelineVersion | null>;
 type GuidelineHistoryMap = Record<GuidelineType, GuidelineVersion[]>;
+type PersistResult = { success: boolean; attempt: number };
 
 const emptyGuidelines = () => Object.fromEntries(guidelineTypes.map((type) => [type, null])) as GuidelineMap;
 const emptyHistories = () => Object.fromEntries(
@@ -26,7 +27,9 @@ export function useProjectDatabase() {
   const repositoryRef = useRef<ProjectRepository | null>(null);
   const guidelineRepositoryRef = useRef<GuidelineRepository | null>(null);
   const poemRepositoryRef = useRef<PoemRepository | null>(null);
-  const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const persistQueueRef = useRef<Promise<boolean>>(Promise.resolve(true));
+  const persistAttemptRef = useRef(0);
+  const lastSuccessfulPersistAttemptRef = useRef(0);
   const pendingPersistRef = useRef(0);
   const searchRef = useRef("");
   const [allProjects, setAllProjects] = useState<Project[]>([]);
@@ -92,8 +95,9 @@ export function useProjectDatabase() {
   }, [refreshGuidelines, refreshProjects]);
 
   const persist = useCallback(async () => {
+    const attempt = ++persistAttemptRef.current;
     const database = databaseRef.current;
-    if (!database) return;
+    if (!database) return { success: false, attempt };
     const snapshot = database.export();
     pendingPersistRef.current += 1;
     setSaveStatus("saving");
@@ -101,17 +105,30 @@ export function useProjectDatabase() {
       let failed = false;
       try {
         await saveProjectDatabase(snapshot);
+        return true;
       } catch (error) {
         failed = true;
         console.error("SQLite 데이터베이스를 저장하지 못했습니다.", error);
         setSaveStatus("error");
+        return false;
       } finally {
         pendingPersistRef.current -= 1;
         if (!failed && pendingPersistRef.current === 0) setSaveStatus("saved");
       }
     };
-    persistQueueRef.current = persistQueueRef.current.catch(() => undefined).then(saveSnapshot);
-    await persistQueueRef.current;
+    persistQueueRef.current = persistQueueRef.current.catch(() => false).then(saveSnapshot);
+    const success = await persistQueueRef.current;
+    if (success) lastSuccessfulPersistAttemptRef.current = Math.max(lastSuccessfulPersistAttemptRef.current, attempt);
+    return { success, attempt };
+  }, []);
+
+  const settlePersistence = useCallback(async (initial: PersistResult) => {
+    let observedAttempt = initial.attempt;
+    while (persistAttemptRef.current > observedAttempt) {
+      observedAttempt = persistAttemptRef.current;
+      await persistQueueRef.current;
+    }
+    return lastSuccessfulPersistAttemptRef.current >= initial.attempt;
   }, []);
 
   const setSearch = useCallback((search: string) => {
@@ -196,7 +213,8 @@ export function useProjectDatabase() {
     const repository = poemRepositoryRef.current;
     if (!repository) return;
     const saved = repository.saveDraft(projectId, input);
-    await persist();
+    const persisted = await persist();
+    if (!persisted.success) throw new Error("시 초안을 저장하지 못했습니다.");
     return saved;
   }, [persist]);
 
@@ -204,17 +222,29 @@ export function useProjectDatabase() {
     const repository = poemRepositoryRef.current;
     if (!repository) return;
     const version = repository.createVersion(projectId);
-    await persist();
+    const persisted = await settlePersistence(await persist());
+    if (!persisted) {
+      databaseRef.current?.run("DELETE FROM poem_versions WHERE id = $id", { $id: version.id });
+      throw new Error("시 버전을 저장하지 못했습니다.");
+    }
     return version;
-  }, [persist]);
+  }, [persist, settlePersistence]);
 
   const restorePoemVersion = useCallback(async (projectId: string, version: number) => {
     const repository = poemRepositoryRef.current;
     if (!repository) return;
+    const previousDraft = repository.openDraft(projectId);
     const restored = repository.restore(projectId, version);
-    await persist();
+    if (!restored) return null;
+    const persisted = await settlePersistence(await persist());
+    if (!persisted) {
+      databaseRef.current?.run("DELETE FROM poem_versions WHERE id = $id", { $id: restored.id });
+      if (previousDraft) repository.saveDraft(projectId, previousDraft);
+      else databaseRef.current?.run("DELETE FROM poem_drafts WHERE project_id = $projectId", { $projectId: projectId });
+      throw new Error("복원한 시 버전을 저장하지 못했습니다.");
+    }
     return restored;
-  }, [persist]);
+  }, [persist, settlePersistence]);
 
   return {
     allProjects,

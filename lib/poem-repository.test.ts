@@ -22,8 +22,66 @@ describe("poem repository", () => {
 
     const saved = poems.saveDraft(projectId, { mode: "keyword", source: "새벽", content: "새벽이 창가에 머문다" });
 
-    expect(saved).toEqual({ mode: "keyword", source: "새벽", content: "새벽이 창가에 머문다", updatedAt: "2026-08-02T10:00:00.000Z" });
+    expect(saved).toEqual({
+      mode: "keyword",
+      source: "새벽",
+      title: "",
+      author: "이용호",
+      content: "새벽이 창가에 머문다",
+      originalTitle: "",
+      originalContent: "새벽이 창가에 머문다",
+      updatedAt: "2026-08-02T10:00:00.000Z",
+    });
     expect(poems.openDraft(projectId)).toEqual(saved);
+  });
+
+  it("migrates a legacy draft with editor defaults and preserved original text", async () => {
+    const SQL = await initSqlJs();
+    const db = new SQL.Database();
+    const projects = createProjectRepository(db, () => "2026-08-02T09:00:00.000Z");
+    const project = projects.create({ name: "기존 프로젝트" });
+    db.run(`CREATE TABLE poem_drafts (
+      project_id TEXT PRIMARY KEY,
+      mode TEXT NOT NULL,
+      source TEXT NOT NULL,
+      content TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`);
+    db.run(`CREATE TABLE poem_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      mode TEXT NOT NULL,
+      source TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(project_id, version)
+    )`);
+    db.run(
+      "INSERT INTO poem_drafts (project_id, mode, source, content, updated_at) VALUES ($projectId, 'existing', '원문', '기존 시 본문', '2026-08-02T09:00:00.000Z')",
+      { $projectId: project.id },
+    );
+    db.run(
+      "INSERT INTO poem_versions (project_id, version, mode, source, content, created_at) VALUES ($projectId, 1, 'existing', '원문', '기존 버전 본문', '2026-08-02T09:00:00.000Z')",
+      { $projectId: project.id },
+    );
+
+    const poems = createPoemRepository(db);
+
+    expect(poems.openDraft(project.id)).toMatchObject({
+      title: "",
+      author: "이용호",
+      content: "기존 시 본문",
+      originalTitle: "",
+      originalContent: "기존 시 본문",
+    });
+    expect(poems.history(project.id)[0]).toMatchObject({
+      title: "",
+      author: "이용호",
+      content: "기존 버전 본문",
+      originalTitle: "",
+      originalContent: "기존 버전 본문",
+    });
   });
 
   it("creates numbered snapshots and lists newest versions first", async () => {
