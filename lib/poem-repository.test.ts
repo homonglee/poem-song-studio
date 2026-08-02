@@ -47,6 +47,28 @@ describe("poem repository", () => {
     ]);
   });
 
+  it("stores the supplied memo on an automatically created v01", async () => {
+    const SQL = await initSqlJs();
+    const db = new SQL.Database();
+    const { poems, projectIds: [projectId] } = setup(db);
+
+    poems.saveDraft(projectId, { mode: "existing", source: "원문", content: "첫 완성본", initialVersionMemo: "초기 완성본" });
+
+    expect(poems.history(projectId)[0]).toMatchObject({ version: 1, memo: "초기 완성본" });
+  });
+
+  it("stores a memo with each explicitly created version", async () => {
+    const SQL = await initSqlJs();
+    const db = new SQL.Database();
+    const { poems, projectIds: [projectId] } = setup(db);
+    poems.saveDraft(projectId, { mode: "existing", source: "원문", content: "첫 완성본" });
+
+    const saved = poems.createVersion(projectId, "행갈이를 다듬음");
+
+    expect(saved).toMatchObject({ version: 2, memo: "행갈이를 다듬음" });
+    expect(poems.history(projectId)[0]).toMatchObject({ version: 2, memo: "행갈이를 다듬음" });
+  });
+
   it("can roll back an automatic v01 that was not persisted", async () => {
     const SQL = await initSqlJs();
     const db = new SQL.Database();
@@ -104,6 +126,7 @@ describe("poem repository", () => {
       content: "기존 버전 본문",
       originalTitle: "",
       originalContent: "기존 버전 본문",
+      memo: "",
     });
   });
 

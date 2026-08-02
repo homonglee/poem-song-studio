@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { StudioDatabase } from "@/hooks/use-project-database";
 import { aiEditActions, editPoemWithAi, type PoemEditAction } from "@/lib/poem-edit-service";
-import { formatPoemVersion, shouldCreateAdditionalVersion } from "@/lib/poem-version";
+import { currentPoemVersionNumber, findPoemVersionById, formatPoemVersion, memoAfterVersionSave, shouldCreateAdditionalVersion } from "@/lib/poem-version";
 import {
   applyEditorChange,
   createEditorHistory,
@@ -76,6 +76,8 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
   const [findCursor, setFindCursor] = useState(0);
   const [clipboardMessage, setClipboardMessage] = useState("");
   const [versionBusy, setVersionBusy] = useState(false);
+  const [versionMemo, setVersionMemo] = useState("");
+  const [openedVersionId, setOpenedVersionId] = useState<string | null>(null);
   const autosaveTimer = useRef<number | null>(null);
   const pendingDraft = useRef<SavePoemDraftInput | null>(null);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
@@ -86,6 +88,8 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
   const document = history.present;
   const stats = useMemo(() => getPoemStats(document.content), [document.content]);
   const matches = useMemo(() => findMatches(document.content, searchQuery), [document.content, searchQuery]);
+  const currentVersionNumber = useMemo(() => currentPoemVersionNumber(versions), [versions]);
+  const openedVersion = useMemo(() => findPoemVersionById(versions, openedVersionId), [openedVersionId, versions]);
 
   function draftFor(nextDocument = document, nextOriginal = original, nextMode = mode, nextSource = source): SavePoemDraftInput {
     return {
@@ -219,10 +223,10 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
     scheduleAutosave(draftFor(next, next));
   }
 
-  async function persistCurrentDocument() {
+  async function persistCurrentDocument(initialVersionMemo?: string) {
     if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
     autosaveTimer.current = null;
-    const next = draftFor();
+    const next = { ...draftFor(), initialVersionMemo };
     pendingDraft.current = next;
     return await persistDraft(next);
   }
@@ -241,16 +245,18 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
     setVersionBusy(true);
     try {
       const versionCountBeforeSave = database.poemHistory(projectId).length;
-      const saved = await persistCurrentDocument();
+      const saved = await persistCurrentDocument(versionMemo);
       if (!saved || pendingDraft.current) return;
       const savedVersions = database.poemHistory(projectId);
       if (!shouldCreateAdditionalVersion(versionCountBeforeSave, savedVersions.length)) {
         setVersions(savedVersions);
+        setVersionMemo((current) => memoAfterVersionSave(current, versionMemo));
         return;
       }
       try {
-        await database.createPoemVersion(projectId);
+        await database.createPoemVersion(projectId, versionMemo);
         setVersions(database.poemHistory(projectId));
+        setVersionMemo((current) => memoAfterVersionSave(current, versionMemo));
       } catch {
         // The shared database save status already exposes the failure.
       }
@@ -460,9 +466,31 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
       </main>
 
       <aside className="border-t border-black/8 bg-white p-5 dark:border-white/8 dark:bg-[#0f1011] sm:p-6 lg:overflow-y-auto lg:border-t-0 lg:border-l">
-        <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-medium text-[#777c83] dark:text-[#8a8f98]">기본 버전 저장</p><h2 className="mt-1 text-base font-semibold">저장된 버전</h2></div><button type="button" onClick={createVersion} disabled={!document.content.trim() || versionBusy} className="h-9 rounded-lg border border-[#5e6ad2]/30 px-3 text-[10px] font-semibold text-[#5e6ad2] disabled:opacity-40">{versionBusy ? "처리 중" : "새 버전 저장"}</button></div>
-        <p className="mt-2 text-[10px] leading-5 text-[#858a91]">이번 단계에서는 버전 비교를 추가하지 않고 기존 저장·복원 기능만 유지합니다.</p>
-        {versions.length === 0 ? <div className="mt-7 rounded-xl border border-dashed border-black/12 p-6 text-center dark:border-white/12"><p className="text-xs font-medium">시를 처음 저장하면 v01이 자동 생성됩니다</p></div> : <ol className="mt-5 space-y-2">{versions.map((version) => <li key={version.id} className="rounded-xl border border-black/8 p-3 dark:border-white/8"><div className="flex items-center justify-between gap-2"><span className="text-xs font-semibold">{formatPoemVersion(version.version)}</span><span className="text-[9px] text-[#92969d]">{dateFormatter.format(new Date(version.createdAt))}</span></div><p className="mt-2 truncate text-[11px] font-medium">{version.title || "제목 없는 시"}</p><p className="mt-1 line-clamp-3 whitespace-pre-line text-[11px] leading-5 text-[#777c83] dark:text-[#8a8f98]">{version.content}</p><button type="button" onClick={() => restoreVersion(version.version)} disabled={versionBusy} className="mt-2 text-[10px] font-semibold text-[#5e6ad2] hover:underline disabled:opacity-40">이 버전 복원</button></li>)}</ol>}
+        <div className="flex items-start justify-between gap-3">
+          <div><p className="text-xs font-medium text-[#777c83] dark:text-[#8a8f98]">7-2단계 · 버전 목록</p><h2 className="mt-1 text-base font-semibold">저장된 버전</h2></div>
+          <button type="button" onClick={createVersion} disabled={!document.content.trim() || versionBusy} className="h-9 rounded-lg border border-[#5e6ad2]/30 px-3 text-[10px] font-semibold text-[#5e6ad2] disabled:opacity-40">{versionBusy ? "처리 중" : "새 버전 저장"}</button>
+        </div>
+        <p className="mt-2 text-[10px] leading-5 text-[#858a91]">버전을 선택해 읽기 전용으로 열 수 있습니다. 비교 기능은 포함하지 않습니다.</p>
+        <label className="mt-3 block"><span className="text-[10px] font-medium text-[#777c83] dark:text-[#9a9fa7]">새 버전 메모</span><input aria-label="새 버전 메모" value={versionMemo} onChange={(event) => setVersionMemo(event.target.value)} maxLength={200} placeholder="예: 2연 표현 수정" className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-[#fafafa] px-3 text-xs outline-none focus:border-[#5e6ad2] dark:border-white/10 dark:bg-white/[0.035]" /></label>
+
+        {openedVersion && <section aria-label="열린 버전" className="mt-4 rounded-xl border border-[#5e6ad2]/25 bg-[#f8f8ff] p-3 dark:bg-[#5e6ad2]/10">
+          <div className="flex items-center justify-between gap-2"><div className="flex items-center gap-2"><span className="text-xs font-semibold">{formatPoemVersion(openedVersion.version)}</span>{openedVersion.version === currentVersionNumber && <span className="rounded-full bg-[#5e6ad2] px-2 py-0.5 text-[8px] font-semibold text-white">현재 버전</span>}</div><button type="button" onClick={() => setOpenedVersionId(null)} aria-label="열린 버전 닫기" className="text-[10px] font-semibold text-[#5e6ad2]">닫기</button></div>
+          <p className="mt-2 text-[9px] text-[#858a91]">생성일 {dateFormatter.format(new Date(openedVersion.createdAt))}</p>
+          <p className="mt-2 text-[11px] font-medium">메모: {openedVersion.memo || "메모 없음"}</p>
+          <p className="mt-2 text-xs font-semibold">{openedVersion.title || "제목 없는 시"}</p>
+          <p className="mt-2 whitespace-pre-wrap text-[11px] leading-5 text-[#666b72] dark:text-[#a0a5ad]">{openedVersion.content}</p>
+        </section>}
+
+        {versions.length === 0 ? <div className="mt-7 rounded-xl border border-dashed border-black/12 p-6 text-center dark:border-white/12"><p className="text-xs font-medium">시를 처음 저장하면 v01이 자동 생성됩니다</p></div> : <ol className="mt-5 space-y-2">{versions.map((version) => {
+          const isCurrent = version.version === currentVersionNumber;
+          const isOpened = version.id === openedVersionId;
+          return <li key={version.id} aria-current={isCurrent ? "true" : undefined} className={`rounded-xl border p-3 ${isOpened ? "border-[#5e6ad2]/50 bg-[#f8f8ff] dark:bg-[#5e6ad2]/10" : "border-black/8 dark:border-white/8"}`}>
+            <div className="flex items-center justify-between gap-2"><div className="flex items-center gap-2"><span className="text-xs font-semibold">{formatPoemVersion(version.version)}</span>{isCurrent && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[8px] font-semibold text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300">현재 버전</span>}</div><span className="text-[9px] text-[#92969d]">생성일 {dateFormatter.format(new Date(version.createdAt))}</span></div>
+            <p className="mt-2 truncate text-[11px] font-medium">{version.title || "제목 없는 시"}</p>
+            <p className="mt-1 truncate text-[10px] text-[#777c83] dark:text-[#8a8f98]">메모: {version.memo || "메모 없음"}</p>
+            <div className="mt-2 flex items-center gap-3"><button type="button" onClick={() => setOpenedVersionId(version.id)} className="text-[10px] font-semibold text-[#5e6ad2] hover:underline">선택 열기</button><button type="button" onClick={() => restoreVersion(version.version)} disabled={versionBusy} className="text-[10px] font-semibold text-[#5e6ad2] hover:underline disabled:opacity-40">이 버전 복원</button></div>
+          </li>;
+        })}</ol>}
       </aside>
     </>
   );

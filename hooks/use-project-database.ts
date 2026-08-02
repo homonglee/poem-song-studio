@@ -222,10 +222,10 @@ export function useProjectDatabase() {
     return saved;
   }, [persist, settlePersistence]);
 
-  const createPoemVersion = useCallback(async (projectId: string) => {
+  const createPoemVersion = useCallback(async (projectId: string, memo = "") => {
     const repository = poemRepositoryRef.current;
     if (!repository) return;
-    const version = repository.createVersion(projectId);
+    const version = repository.createVersion(projectId, memo);
     const persisted = await settlePersistence(await persist());
     if (!persisted) {
       databaseRef.current?.run("DELETE FROM poem_versions WHERE id = $id", { $id: version.id });

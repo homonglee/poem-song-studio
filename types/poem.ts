@@ -19,10 +19,12 @@ export interface SavePoemDraftInput {
   content: string;
   originalTitle?: string;
   originalContent?: string;
+  initialVersionMemo?: string;
 }
 
 export interface PoemVersion extends PoemDraft {
   id: string;
   version: number;
+  memo: string;
   createdAt: string;
 }

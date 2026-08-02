@@ -27,6 +27,10 @@ function migrateEditorColumns(db: Database, table: "poem_drafts" | "poem_version
   if (originalContentAdded) db.run(`UPDATE ${table} SET original_content = content`);
 }
 
+function migrateVersionColumns(db: Database) {
+  addColumn(db, "poem_versions", tableColumns(db, "poem_versions"), "memo", "TEXT NOT NULL DEFAULT ''");
+}
+
 export function createPoemRepository(db: Database, now: Clock = () => new Date().toISOString()) {
   db.run("PRAGMA foreign_keys = ON");
   db.run(`
@@ -54,6 +58,7 @@ export function createPoemRepository(db: Database, now: Clock = () => new Date()
       content TEXT NOT NULL,
       original_title TEXT NOT NULL DEFAULT '',
       original_content TEXT NOT NULL DEFAULT '',
+      memo TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       UNIQUE(project_id, version)
     )
@@ -62,6 +67,7 @@ export function createPoemRepository(db: Database, now: Clock = () => new Date()
   try {
     migrateEditorColumns(db, "poem_drafts");
     migrateEditorColumns(db, "poem_versions");
+    migrateVersionColumns(db);
     db.run("COMMIT");
   } catch (error) {
     db.run("ROLLBACK");
@@ -123,7 +129,7 @@ export function createPoemRepository(db: Database, now: Clock = () => new Date()
         $updatedAt: draft.updatedAt,
       },
     );
-    if (draft.content.trim() && history(projectId).length === 0) createVersion(projectId);
+    if (draft.content.trim() && history(projectId).length === 0) createVersion(projectId, input.initialVersionMemo);
     return draft;
   }
 
@@ -143,6 +149,7 @@ export function createPoemRepository(db: Database, now: Clock = () => new Date()
         content: row.content as string,
         originalTitle: row.original_title as string,
         originalContent: row.original_content as string,
+        memo: row.memo as string,
         createdAt: row.created_at as string,
         updatedAt: row.created_at as string,
       });
@@ -151,7 +158,7 @@ export function createPoemRepository(db: Database, now: Clock = () => new Date()
     return versions;
   }
 
-  function createVersion(projectId: string): PoemVersion {
+  function createVersion(projectId: string, memo = ""): PoemVersion {
     const draft = openDraft(projectId);
     if (!draft || !draft.content.trim()) throw new Error("버전으로 저장할 시가 없습니다.");
     const statement = db.prepare("SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM poem_versions WHERE project_id = $projectId");
@@ -160,10 +167,10 @@ export function createPoemRepository(db: Database, now: Clock = () => new Date()
     const version = statement.getAsObject().next_version as number;
     statement.free();
     const createdAt = now();
-    const snapshot: PoemVersion = { ...draft, id: crypto.randomUUID(), version, createdAt };
+    const snapshot: PoemVersion = { ...draft, id: crypto.randomUUID(), version, memo: memo.trim(), createdAt };
     db.run(
-      `INSERT INTO poem_versions (id, project_id, version, mode, source, title, author, content, original_title, original_content, created_at)
-       VALUES ($id, $projectId, $version, $mode, $source, $title, $author, $content, $originalTitle, $originalContent, $createdAt)`,
+      `INSERT INTO poem_versions (id, project_id, version, mode, source, title, author, content, original_title, original_content, memo, created_at)
+       VALUES ($id, $projectId, $version, $mode, $source, $title, $author, $content, $originalTitle, $originalContent, $memo, $createdAt)`,
       {
         $id: snapshot.id,
         $projectId: projectId,
@@ -175,6 +182,7 @@ export function createPoemRepository(db: Database, now: Clock = () => new Date()
         $content: snapshot.content,
         $originalTitle: snapshot.originalTitle,
         $originalContent: snapshot.originalContent,
+        $memo: snapshot.memo,
         $createdAt: createdAt,
       },
     );
