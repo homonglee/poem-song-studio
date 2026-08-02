@@ -3,7 +3,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { StudioDatabase } from "@/hooks/use-project-database";
+import { requestPoemAi } from "@/lib/poem-ai-client";
+import { isPoemSelectionSnapshotCurrent } from "@/lib/poem-ai-selection";
+import { isPoemAsyncOperationActive } from "@/lib/poem-async-operation";
 import { aiEditActions, editPoemWithAi, type PoemEditAction } from "@/lib/poem-edit-service";
+import { extractKoreanText, validateOcrImage } from "@/lib/poem-ocr-service";
 import { comparePoemLines, togglePoemVersionSelection } from "@/lib/poem-version-comparison";
 import { currentPoemVersionNumber, findPoemVersionById, formatPoemVersion, memoAfterVersionSave, shouldCreateAdditionalVersion } from "@/lib/poem-version";
 import {
@@ -19,7 +23,6 @@ import {
   type EditorDocument,
   type EditorHistory,
 } from "@/lib/poem-editor";
-import { generateMockPoem } from "@/lib/mock-poem-ai";
 import type { PoemInputMode, PoemVersion, SavePoemDraftInput } from "@/types/poem";
 
 const modeMeta: Record<PoemInputMode, { number: string; title: string }> = {
@@ -70,8 +73,12 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
   const [generating, setGenerating] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiRunning, setAiRunning] = useState<PoemEditAction | null>(null);
+  const [aiError, setAiError] = useState("");
   const [dirty, setDirty] = useState(false);
-  const [ocrFileName, setOcrFileName] = useState("");
+  const [ocrFile, setOcrFile] = useState<File | null>(null);
+  const [ocrOperationEpoch, setOcrOperationEpoch] = useState<number | null>(null);
+  const [ocrProgress, setOcrProgress] = useState(0);
+  const [ocrError, setOcrError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [replaceQuery, setReplaceQuery] = useState("");
   const [findCursor, setFindCursor] = useState(0);
@@ -86,6 +93,7 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
   const versionOperation = useRef(false);
   const editorEpoch = useRef(0);
   const mounted = useRef(true);
+  const ocrRunning = ocrOperationEpoch !== null;
   const savePoemDraft = database.savePoemDraft;
   const document = history.present;
   const stats = useMemo(() => getPoemStats(document.content), [document.content]);
@@ -100,6 +108,14 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
     ? comparePoemLines(comparisonVersions[0].content, comparisonVersions[1].content)
     : [], [comparisonVersions]);
   const changedLineCount = useMemo(() => lineComparison.filter((line) => line.status !== "unchanged").length, [lineComparison]);
+
+  function advanceEditorEpoch(): number {
+    const nextEpoch = ++editorEpoch.current;
+    setGenerating(false);
+    setAiRunning(null);
+    setOcrOperationEpoch(null);
+    return nextEpoch;
+  }
 
   function draftFor(nextDocument = document, nextOriginal = original, nextMode = mode, nextSource = source): SavePoemDraftInput {
     return {
@@ -145,16 +161,17 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
 
   function updateDocument(next: EditorDocument, nextOriginal = original) {
     if (versionOperation.current) return;
-    editorEpoch.current += 1;
+    advanceEditorEpoch();
     setGenerating(false);
     setAiRunning(null);
+    setAiError("");
     setHistory((current) => applyEditorChange(current, next));
     scheduleAutosave(draftFor(next, nextOriginal));
   }
 
   function setHistoryAndSave(nextHistory: EditorHistory) {
     if (versionOperation.current || nextHistory === history) return;
-    editorEpoch.current += 1;
+    advanceEditorEpoch();
     setGenerating(false);
     setAiRunning(null);
     setHistory(nextHistory);
@@ -190,9 +207,13 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
 
   function changeMode(nextMode: PoemInputMode) {
     if (versionOperation.current) return;
-    editorEpoch.current += 1;
+    advanceEditorEpoch();
     setGenerating(false);
     setAiRunning(null);
+    setAiError("");
+    setOcrOperationEpoch(null);
+    setOcrProgress(0);
+    setOcrError("");
     setMode(nextMode);
     setSource("");
     scheduleAutosave(draftFor(document, original, nextMode, ""));
@@ -200,37 +221,96 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
 
   function changeSource(nextSource: string) {
     if (versionOperation.current) return;
-    editorEpoch.current += 1;
+    advanceEditorEpoch();
     setGenerating(false);
     setAiRunning(null);
+    setAiError("");
     setSource(nextSource);
     scheduleAutosave(draftFor(document, original, mode, nextSource));
   }
 
   async function generateFromKeyword() {
-    if (!source.trim() || versionOperation.current) return;
-    const epoch = ++editorEpoch.current;
+    const keyword = source.trim();
+    if (!keyword || versionOperation.current) return;
+    const epoch = advanceEditorEpoch();
     setAiRunning(null);
+    setAiError("");
     setGenerating(true);
-    const generated = await generateMockPoem({ mode: "keyword", input: source });
-    if (epoch !== editorEpoch.current || versionOperation.current) return;
-    const next = { title: source.trim(), content: generated };
-    editorEpoch.current += 1;
-    setOriginal(next);
-    setHistory((current) => applyEditorChange(current, next));
-    scheduleAutosave(draftFor(next, next));
-    setGenerating(false);
+    try {
+      const generated = await requestPoemAi({ operation: "generate", input: keyword });
+      if (epoch !== editorEpoch.current || versionOperation.current) return;
+      const next = { title: keyword, content: generated };
+      setGenerating(false);
+      advanceEditorEpoch();
+      setOriginal(next);
+      setHistory((current) => applyEditorChange(current, next));
+      scheduleAutosave(draftFor(next, next));
+    } catch (error) {
+      if (epoch === editorEpoch.current) {
+        setAiError(error instanceof Error ? error.message : "AI 시 생성에 실패했습니다. 다시 시도하세요.");
+      }
+    } finally {
+      if (epoch === editorEpoch.current) setGenerating(false);
+    }
   }
 
-  function importExistingPoem() {
+  function importSourcePoem() {
     if (!source.trim() || versionOperation.current) return;
-    editorEpoch.current += 1;
+    advanceEditorEpoch();
     setGenerating(false);
     setAiRunning(null);
+    setAiError("");
     const next = { title: document.title, content: source };
     setOriginal(next);
     setHistory((current) => applyEditorChange(current, next));
     scheduleAutosave(draftFor(next, next));
+  }
+
+  function selectOcrFile(file: File | null) {
+    advanceEditorEpoch();
+    setOcrOperationEpoch(null);
+    setOcrProgress(0);
+    setOcrError("");
+    if (!file) {
+      setOcrFile(null);
+      return;
+    }
+    const validationError = validateOcrImage(file);
+    if (validationError) {
+      setOcrFile(null);
+      setOcrError(validationError);
+      return;
+    }
+    setOcrFile(file);
+  }
+
+  async function recognizeOcrImage() {
+    if (!ocrFile || versionOperation.current) return;
+    const epoch = advanceEditorEpoch();
+    setOcrOperationEpoch(epoch);
+    setOcrProgress(0);
+    setOcrError("");
+    try {
+      const recognized = await extractKoreanText(ocrFile, {
+        onProgress: (progress) => {
+          if (isPoemAsyncOperationActive(epoch, editorEpoch.current)) setOcrProgress(progress);
+        },
+      });
+      if (epoch !== editorEpoch.current || versionOperation.current) return;
+      if (!recognized) {
+        setOcrError("이미지에서 한글 텍스트를 찾지 못했습니다. 다른 이미지를 시도하세요.");
+        return;
+      }
+      setSource(recognized);
+      setOcrProgress(100);
+      scheduleAutosave(draftFor(document, original, "ocr", recognized));
+    } catch {
+      if (epoch === editorEpoch.current) {
+        setOcrError("OCR 인식에 실패했습니다. 네트워크 상태와 이미지 품질을 확인한 뒤 다시 시도하세요.");
+      }
+    } finally {
+      if (isPoemAsyncOperationActive(epoch, editorEpoch.current)) setOcrOperationEpoch(null);
+    }
   }
 
   async function persistCurrentDocument(initialVersionMemo?: string) {
@@ -249,7 +329,7 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
   async function createVersion() {
     if (!document.content.trim() || versionOperation.current) return;
     versionOperation.current = true;
-    editorEpoch.current += 1;
+    advanceEditorEpoch();
     setGenerating(false);
     setAiRunning(null);
     setVersionBusy(true);
@@ -279,7 +359,7 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
   async function restoreVersion(version: number) {
     if (versionOperation.current) return;
     versionOperation.current = true;
-    editorEpoch.current += 1;
+    advanceEditorEpoch();
     setGenerating(false);
     setAiRunning(null);
     setVersionBusy(true);
@@ -355,7 +435,7 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
 
   async function pasteText() {
     if (versionOperation.current) return;
-    const epoch = ++editorEpoch.current;
+    const epoch = advanceEditorEpoch();
     setGenerating(false);
     setAiRunning(null);
     try {
@@ -380,24 +460,46 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
     const start = textarea?.selectionStart ?? 0;
     const end = textarea?.selectionEnd ?? 0;
     if (action === "selection" && start === end) {
-      setClipboardMessage("수정할 영역을 먼저 선택하세요");
+      setAiError("수정할 영역을 먼저 선택하세요.");
       return;
     }
-    const epoch = ++editorEpoch.current;
+    const epoch = advanceEditorEpoch();
     setGenerating(false);
+    setAiError("");
     setAiRunning(action);
     const target = action === "selection" ? document.content.slice(start, end) : document.content;
-    const edited = await editPoemWithAi({ action, text: target });
-    if (epoch !== editorEpoch.current || versionOperation.current) return;
-    if (action === "selection") {
-      const result = insertAtSelection(document.content, start, end, edited);
-      updateDocument({ ...document, content: result.content });
-      focusAt(start, result.caret);
-    } else {
-      updateDocument({ ...document, content: edited });
+    const selectionSnapshot = { content: document.content, start, end };
+    try {
+      const edited = action === "selection"
+        ? await requestPoemAi({ operation: "selection", input: target, context: document.content })
+        : action === "refine"
+          ? await requestPoemAi({ operation: "refine", input: target })
+          : await editPoemWithAi({ action, text: target });
+      if (epoch !== editorEpoch.current || versionOperation.current) return;
+      if (action === "selection") {
+        const currentEditor = editorRef.current;
+        if (!currentEditor || !isPoemSelectionSnapshotCurrent(selectionSnapshot, {
+          content: currentEditor.value,
+          start: currentEditor.selectionStart,
+          end: currentEditor.selectionEnd,
+        })) {
+          setAiError("선택 영역이 변경되어 AI 수정 결과를 적용하지 않았습니다. 다시 선택해 주세요.");
+          return;
+        }
+        const result = insertAtSelection(document.content, start, end, edited);
+        updateDocument({ ...document, content: result.content });
+        focusAt(start, result.caret);
+      } else {
+        updateDocument({ ...document, content: edited });
+      }
+      setAiOpen(false);
+    } catch (error) {
+      if (epoch === editorEpoch.current) {
+        setAiError(error instanceof Error ? error.message : "AI 수정에 실패했습니다. 다시 시도하세요.");
+      }
+    } finally {
+      if (epoch === editorEpoch.current) setAiRunning(null);
     }
-    setAiRunning(null);
-    setAiOpen(false);
   }
 
   function revertToOriginal() {
@@ -424,7 +526,7 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
       <main className="min-w-0 p-4 sm:p-6 lg:overflow-y-auto lg:p-7">
         <div className="mx-auto max-w-5xl">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-            <div><div className="flex flex-wrap items-center gap-2"><p className="text-xs font-medium text-[#6f747b] dark:text-[#8a8f98]">6단계 · 시 편집</p><span className="rounded-full bg-amber-50 px-2 py-1 text-[9px] font-semibold text-amber-700 dark:bg-amber-400/10 dark:text-amber-300">AI MOCK</span><span className="rounded-full bg-[#f2f3f5] px-2 py-1 text-[9px] font-medium text-[#6f747b] dark:bg-white/[0.05] dark:text-[#a0a5ad]">{projectName}</span></div><h2 className="mt-1 text-2xl font-semibold tracking-[-0.035em] sm:text-[28px]">시를 직접 다듬어 보세요</h2></div>
+            <div><div className="flex flex-wrap items-center gap-2"><p className="text-xs font-medium text-[#6f747b] dark:text-[#8a8f98]">6단계 · 시 편집</p><span className="rounded-full bg-emerald-50 px-2 py-1 text-[9px] font-semibold text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300">OCR + GEMINI</span><span className="rounded-full bg-[#f2f3f5] px-2 py-1 text-[9px] font-medium text-[#6f747b] dark:bg-white/[0.05] dark:text-[#a0a5ad]">{projectName}</span></div><h2 className="mt-1 text-2xl font-semibold tracking-[-0.035em] sm:text-[28px]">시를 직접 다듬어 보세요</h2></div>
             <div className="flex items-center gap-2"><span aria-live="polite" className={`rounded-full px-3 py-2 text-[10px] font-semibold ${database.saveStatus === "error" ? "bg-red-50 text-red-700 dark:bg-red-400/10 dark:text-red-300" : database.saveStatus === "saving" ? "bg-amber-50 text-amber-700 dark:bg-amber-400/10 dark:text-amber-300" : "bg-emerald-50 text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300"}`}>{saveLabel}</span><button type="button" onClick={manualSave} disabled={versionBusy} className="h-10 rounded-lg bg-[#5e6ad2] px-4 text-xs font-semibold text-white hover:bg-[#515cc4] disabled:opacity-40">수동 저장</button></div>
           </div>
 
@@ -434,9 +536,22 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
               {(Object.keys(modeMeta) as PoemInputMode[]).map((item) => <button key={item} type="button" role="tab" aria-selected={mode === item} onClick={() => changeMode(item)} className={`min-h-11 whitespace-nowrap rounded-lg px-1 text-[11px] font-semibold sm:px-2 sm:text-xs ${mode === item ? "bg-[#5e6ad2] text-white" : "bg-[#f2f3f5] text-[#666b72] dark:bg-white/[0.05] dark:text-[#a0a5ad]"}`}><span className="mr-1">{modeMeta[item].number}</span>{modeMeta[item].title}</button>)}
             </div>
             <div className="mt-4">
-              {mode === "keyword" && <div><label className="block"><span className="text-xs font-medium">주제어</span><input value={source} onChange={(event) => changeSource(event.target.value)} maxLength={100} placeholder="예: 새벽, 그리움, 봄비" className="mt-2 h-11 w-full rounded-lg border border-black/10 bg-[#fafafa] px-3 text-sm outline-none dark:border-white/10 dark:bg-white/[0.035]" /></label><button type="button" onClick={generateFromKeyword} disabled={!source.trim() || generating} className="mt-3 h-10 rounded-lg bg-[#5e6ad2] px-4 text-xs font-semibold text-white disabled:opacity-40">{generating ? "Mock 생성 중" : "Mock AI로 초안 만들기"}</button></div>}
-              {mode === "existing" && <div><label className="block"><span className="text-xs font-medium">기존 시 원문</span><textarea value={source} onChange={(event) => changeSource(event.target.value)} rows={6} maxLength={12000} placeholder="기존 시를 붙여 넣으세요." className="mt-2 w-full rounded-lg border border-black/10 bg-[#fafafa] p-3 text-sm leading-6 outline-none dark:border-white/10 dark:bg-white/[0.035]" /></label><button type="button" onClick={importExistingPoem} disabled={!source.trim()} className="mt-3 h-10 rounded-lg bg-[#5e6ad2] px-4 text-xs font-semibold text-white disabled:opacity-40">편집기로 가져오기</button></div>}
-              {mode === "ocr" && <div className="rounded-xl border-2 border-dashed border-black/10 bg-[#fafafa] px-5 py-8 text-center dark:border-white/10 dark:bg-white/[0.025]"><p className="text-sm font-semibold">시 이미지 선택</p><p className="mt-1 text-xs text-[#858a91]">OCR 화면만 제공하며 실제 인식은 실행하지 않습니다.</p><label className="mt-4 inline-flex h-10 cursor-pointer items-center rounded-lg border border-black/10 bg-white px-4 text-xs font-semibold dark:border-white/10 dark:bg-white/[0.04]"><input type="file" accept="image/*" className="sr-only" onChange={(event) => setOcrFileName(event.target.files?.[0]?.name ?? "")} />이미지 선택</label>{ocrFileName && <p className="mt-3 text-[11px] text-[#6f747b]">선택됨: {ocrFileName}</p>}</div>}
+              {mode === "keyword" && <div>
+                <label className="block"><span className="text-xs font-medium">주제어</span><input value={source} onChange={(event) => changeSource(event.target.value)} maxLength={100} placeholder="예: 새벽, 그리움, 봄비" className="mt-2 h-11 w-full rounded-lg border border-black/10 bg-[#fafafa] px-3 text-sm outline-none dark:border-white/10 dark:bg-white/[0.035]" /></label>
+                <button type="button" onClick={generateFromKeyword} disabled={!source.trim() || generating} className="mt-3 h-10 rounded-lg bg-[#5e6ad2] px-4 text-xs font-semibold text-white disabled:opacity-40">{generating ? "AI 생성 중…" : "AI로 초안 만들기"}</button>
+              </div>}
+              {mode === "existing" && <div><label className="block"><span className="text-xs font-medium">기존 시 원문</span><textarea value={source} onChange={(event) => changeSource(event.target.value)} rows={6} maxLength={12000} placeholder="기존 시를 붙여 넣으세요." className="mt-2 w-full rounded-lg border border-black/10 bg-[#fafafa] p-3 text-sm leading-6 outline-none dark:border-white/10 dark:bg-white/[0.035]" /></label><button type="button" onClick={importSourcePoem} disabled={!source.trim()} className="mt-3 h-10 rounded-lg bg-[#5e6ad2] px-4 text-xs font-semibold text-white disabled:opacity-40">편집기로 가져오기</button></div>}
+              {mode === "ocr" && <div className="rounded-xl border-2 border-dashed border-black/10 bg-[#fafafa] p-4 dark:border-white/10 dark:bg-white/[0.025] sm:p-5">
+                <div className="text-center"><p className="text-sm font-semibold">시 이미지 OCR</p><p className="mt-1 text-xs leading-5 text-[#858a91]">10MB 이하 이미지에서 한글과 영문을 브라우저 안에서 인식합니다.</p>
+                  <label className="mt-4 inline-flex h-10 cursor-pointer items-center rounded-lg border border-black/10 bg-white px-4 text-xs font-semibold dark:border-white/10 dark:bg-white/[0.04]"><input type="file" accept="image/*" className="sr-only" onChange={(event) => selectOcrFile(event.target.files?.[0] ?? null)} />이미지 선택</label>
+                  {ocrFile && <p className="mt-3 break-all text-[11px] text-[#6f747b]">선택됨: {ocrFile.name}</p>}
+                  <button type="button" onClick={recognizeOcrImage} disabled={!ocrFile || ocrRunning} className="ml-2 mt-4 h-10 rounded-lg bg-[#5e6ad2] px-4 text-xs font-semibold text-white disabled:opacity-40">{ocrRunning ? `한글 인식 중 ${ocrProgress}%` : "한글 OCR 시작"}</button>
+                </div>
+                {ocrRunning && <progress aria-label="OCR 인식 진행률" value={ocrProgress} max={100} className="mt-4 h-2 w-full" />}
+                {ocrError && <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-xs leading-5 text-red-700 dark:bg-red-400/10 dark:text-red-300">{ocrError}</p>}
+                <label className="mt-4 block"><span className="text-xs font-medium">OCR 결과 편집</span><textarea aria-label="OCR 결과 편집" value={source} onChange={(event) => changeSource(event.target.value)} rows={8} maxLength={30000} placeholder="인식 결과가 여기에 표시됩니다. 가져오기 전에 직접 수정할 수 있습니다." className="mt-2 w-full rounded-lg border border-black/10 bg-white p-3 text-sm leading-6 outline-none focus:border-[#5e6ad2] dark:border-white/10 dark:bg-[#111214]" /></label>
+                <button type="button" onClick={importSourcePoem} disabled={!source.trim() || ocrRunning} className="mt-3 h-10 rounded-lg bg-[#5e6ad2] px-4 text-xs font-semibold text-white disabled:opacity-40">OCR 결과를 편집기로 가져오기</button>
+              </div>}
             </div>
           </details>
 
@@ -460,7 +575,14 @@ export function PoemWriter({ database, projectId, projectName, onDirtyChange }: 
               <button type="button" onClick={() => setAiOpen((open) => !open)} className="h-9 rounded-lg bg-[#5e6ad2] px-3 text-[11px] font-semibold text-white">AI 편집</button>
             </div>
 
-            {aiOpen && <div className="mt-3 rounded-xl border border-[#5e6ad2]/20 bg-[#f8f8ff] p-3 dark:bg-[#5e6ad2]/10"><div className="mb-2 flex items-center justify-between"><p className="text-xs font-semibold">AI 편집 메뉴 <span className="text-[9px] font-medium text-amber-600">Mock 응답</span></p><button type="button" onClick={() => setAiOpen(false)} aria-label="AI 편집 메뉴 닫기" className="text-xs">닫기</button></div><div className="grid gap-2 sm:grid-cols-2">{aiEditActions.map((action) => <button key={action.id} type="button" onClick={() => runAiEdit(action.id)} disabled={aiRunning !== null || !document.content.trim()} className="rounded-lg border border-black/8 bg-white px-3 py-2 text-left text-[11px] font-medium hover:border-[#5e6ad2]/50 disabled:opacity-40 dark:border-white/8 dark:bg-[#111214]">{aiRunning === action.id ? "Mock 처리 중…" : action.label}</button>)}</div></div>}
+            {aiOpen && <div className="mt-3 rounded-xl border border-[#5e6ad2]/20 bg-[#f8f8ff] p-3 dark:bg-[#5e6ad2]/10">
+              <div className="mb-2 flex items-center justify-between gap-3"><p className="text-xs font-semibold">시 편집 메뉴 <span className="text-[9px] font-medium text-emerald-700 dark:text-emerald-300">전체 정제·선택 수정은 Gemini</span></p><button type="button" onClick={() => setAiOpen(false)} aria-label="AI 편집 메뉴 닫기" className="text-xs">닫기</button></div>
+              <div className="grid gap-2 sm:grid-cols-2">{aiEditActions.map((action) => {
+                const usesGemini = action.id === "selection" || action.id === "refine";
+                return <button key={action.id} type="button" onClick={() => runAiEdit(action.id)} disabled={aiRunning !== null || !document.content.trim()} className="rounded-lg border border-black/8 bg-white px-3 py-2 text-left text-[11px] font-medium hover:border-[#5e6ad2]/50 disabled:opacity-40 dark:border-white/8 dark:bg-[#111214]">{aiRunning === action.id ? usesGemini ? "Gemini 처리 중…" : "로컬 처리 중…" : <>{action.label}<span className="ml-1 text-[9px] text-[#8a8f98]">{usesGemini ? "AI" : "로컬"}</span></>}</button>;
+              })}</div>
+            </div>}
+            {aiError && <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-5 text-red-700 dark:bg-red-400/10 dark:text-red-300">{aiError}</p>}
 
             <div className="mt-4 grid gap-2 rounded-xl bg-[#f6f7f9] p-3 dark:bg-white/[0.035] sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
               <label><span className="sr-only">검색어</span><input value={searchQuery} onChange={(event) => { setSearchQuery(event.target.value); setFindCursor(0); }} placeholder="시 본문 검색" className="h-9 w-full rounded-lg border border-black/10 bg-white px-3 text-xs outline-none dark:border-white/10 dark:bg-[#111214]" /></label>
